@@ -1,0 +1,20 @@
+[Unit]
+Description=Diamond Learning Server
+After=network.target ollama.service
+Wants=ollama.service
+
+[Service]
+Type=simple
+User=diamond
+WorkingDirectory=/opt/diamond
+ExecStart=/opt/diamond/diamond
+Restart=on-failure
+RestartSec=5
+
+Environment=DIAMOND_OLLAMA_URL=http://localhost:11434
+Environment=DIAMOND_MODEL=llama3.2:3b
+Environment=DIAMOND_PORT=7331
+Environment=DIAMOND_DATA_DIR=/var/lib/diamond
+
+[Install]
+WantedBy=multi-user.target
