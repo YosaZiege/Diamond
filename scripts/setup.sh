@@ -27,9 +27,8 @@ else
 fi
 
 # ---- Models ----
-echo "[3/5] Pulling models (good for 8GB RAM)..."
-ollama pull llama3.2:3b          # general chat + explanations (2GB)
-ollama pull qwen2.5-coder:3b     # code-focused tasks (2GB)
+echo "[3/5] Pulling model..."
+ollama pull qwen2.5-coder:3b
 
 # ---- Build Diamond ----
 echo "[4/5] Building Diamond server..."
