@@ -18,6 +18,7 @@ local config = {
     progress   = '<leader>dp',
     weak_areas = '<leader>dw',
     health     = '<leader>dh',
+    lcd        = '<leader>dl',
   },
 }
 
@@ -298,6 +299,24 @@ function M.weak_areas()
   end)
 end
 
+function M.lcd(line1_arg)
+  local line1 = line1_arg or vim.fn.input('LCD line 1: ')
+  if line1 == '' then return end
+  local line2 = vim.fn.input('LCD line 2 (optional): ')
+  local ttl_s = vim.fn.input('Seconds to show [30]: ')
+  local ttl = tonumber(ttl_s) or 30
+
+  post('/api/lcd', { line1 = line1:sub(1,16), line2 = line2:sub(1,16), ttl = ttl }, function(data, err)
+    vim.schedule(function()
+      if err or not data then
+        vim.notify('Diamond LCD: ' .. (err or 'failed'), vim.log.levels.ERROR)
+        return
+      end
+      vim.notify(string.format('Diamond LCD: sent for %ds', ttl), vim.log.levels.INFO)
+    end)
+  end)
+end
+
 function M.health()
   get('/api/health', function(data, err)
     vim.schedule(function()
@@ -328,6 +347,7 @@ function M.setup(opts)
   vim.api.nvim_create_user_command('DiamondProgress', function() M.progress() end, {})
   vim.api.nvim_create_user_command('DiamondWeakAreas',function() M.weak_areas() end, {})
   vim.api.nvim_create_user_command('DiamondHealth',   function() M.health() end, {})
+  vim.api.nvim_create_user_command('DiamondLCD',      function(a) M.lcd(a.args ~= '' and a.args or nil) end, { nargs = '?' })
 
   -- Keymaps
   local km = config.keymaps
@@ -336,6 +356,7 @@ function M.setup(opts)
   vim.keymap.set('n',          km.progress,   M.progress,   { desc = 'Diamond: progress', silent = true })
   vim.keymap.set('n',          km.weak_areas, M.weak_areas, { desc = 'Diamond: weak areas', silent = true })
   vim.keymap.set('n',          km.health,     M.health,     { desc = 'Diamond: health check', silent = true })
+  vim.keymap.set('n',          km.lcd,        M.lcd,        { desc = 'Diamond: send LCD message', silent = true })
 end
 
 return M

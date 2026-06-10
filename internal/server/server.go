@@ -28,6 +28,14 @@ type Server struct {
 	adaptive *adaptive.Engine
 	sessions map[string]*quizSession
 	sessLock sync.Mutex
+	lcd      lcdStore
+}
+
+type lcdStore struct {
+	mu      sync.Mutex
+	line1   string
+	line2   string
+	expires time.Time
 }
 
 type quizSession struct {
@@ -72,6 +80,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/quiz/answer", s.handleQuizAnswer)
 	s.mux.HandleFunc("GET /api/progress", s.handleProgress)
 	s.mux.HandleFunc("GET /api/weak-areas", s.handleWeakAreas)
+	s.mux.HandleFunc("POST /api/lcd", s.handleLCDSet)
+	s.mux.HandleFunc("GET /api/lcd", s.handleLCDGet)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -340,6 +350,50 @@ func (s *Server) handleWeakAreas(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonResp(w, http.StatusOK, map[string]any{"weak_areas": items})
+}
+
+func (s *Server) handleLCDSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Line1 string `json:"line1"`
+		Line2 string `json:"line2"`
+		TTL   int    `json:"ttl"` // seconds; default 30
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Line1 == "" {
+		httpErr(w, http.StatusBadRequest, "line1 required")
+		return
+	}
+	if req.TTL <= 0 {
+		req.TTL = 30
+	}
+	// Truncate to 16 chars (standard LCD width)
+	if len(req.Line1) > 16 {
+		req.Line1 = req.Line1[:16]
+	}
+	if len(req.Line2) > 16 {
+		req.Line2 = req.Line2[:16]
+	}
+
+	s.lcd.mu.Lock()
+	s.lcd.line1 = req.Line1
+	s.lcd.line2 = req.Line2
+	s.lcd.expires = time.Now().Add(time.Duration(req.TTL) * time.Second)
+	s.lcd.mu.Unlock()
+
+	jsonResp(w, http.StatusOK, map[string]any{"ok": true, "ttl": req.TTL})
+}
+
+func (s *Server) handleLCDGet(w http.ResponseWriter, r *http.Request) {
+	s.lcd.mu.Lock()
+	line1 := s.lcd.line1
+	line2 := s.lcd.line2
+	active := line1 != "" && time.Now().Before(s.lcd.expires)
+	s.lcd.mu.Unlock()
+
+	jsonResp(w, http.StatusOK, map[string]any{
+		"active": active,
+		"line1":  line1,
+		"line2":  line2,
+	})
 }
 
 // ---- helpers ----
