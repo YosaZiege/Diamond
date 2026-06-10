@@ -23,12 +23,14 @@ type Config struct {
 }
 
 type Server struct {
-	mux      *http.ServeMux
-	ollama   *ollama.Client
-	adaptive *adaptive.Engine
-	sessions map[string]*quizSession
-	sessLock sync.Mutex
-	lcd      lcdStore
+	mux        *http.ServeMux
+	ollama     *ollama.Client
+	adaptive   *adaptive.Engine
+	sessions   map[string]*quizSession
+	sessLock   sync.Mutex
+	exSessions map[string]*exerciseSession
+	exLock     sync.Mutex
+	lcd        lcdStore
 }
 
 type lcdStore struct {
@@ -36,6 +38,14 @@ type lcdStore struct {
 	line1   string
 	line2   string
 	expires time.Time
+}
+
+type exerciseSession struct {
+	Topic        string
+	Language     string
+	Task         string
+	Requirements []string
+	CreatedAt    time.Time
 }
 
 type quizSession struct {
@@ -55,7 +65,8 @@ func New(cfg Config) (*Server, error) {
 		mux:      http.NewServeMux(),
 		ollama:   ollama.New(cfg.OllamaURL, cfg.Model),
 		adaptive: eng,
-		sessions: make(map[string]*quizSession),
+		sessions:   make(map[string]*quizSession),
+		exSessions: make(map[string]*exerciseSession),
 	}
 	s.routes()
 	return s, nil
@@ -82,6 +93,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/weak-areas", s.handleWeakAreas)
 	s.mux.HandleFunc("POST /api/lcd", s.handleLCDSet)
 	s.mux.HandleFunc("GET /api/lcd", s.handleLCDGet)
+	s.mux.HandleFunc("POST /api/ask", s.handleAsk)
+	s.mux.HandleFunc("POST /api/exercise/start", s.handleExerciseStart)
+	s.mux.HandleFunc("POST /api/exercise/submit", s.handleExerciseSubmit)
+	s.mux.HandleFunc("POST /api/flashcards", s.handleFlashcards)
+	// catch-all: return JSON 404 instead of Go's default plain-text "404 page not found"
+	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		httpErr(w, http.StatusNotFound, "unknown endpoint: "+r.Method+" "+r.URL.Path)
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -350,6 +369,226 @@ func (s *Server) handleWeakAreas(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonResp(w, http.StatusOK, map[string]any{"weak_areas": items})
+}
+
+func (s *Server) handleExerciseStart(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Topic    string `json:"topic"`
+		Context  string `json:"context"`
+		Language string `json:"language"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Topic == "" {
+		httpErr(w, http.StatusBadRequest, "topic required")
+		return
+	}
+	if req.Language == "" {
+		req.Language = "go"
+	}
+
+	system := `You are a coding teacher. Generate a practical coding exercise. Reply ONLY with JSON:
+{"task":"clear problem statement","requirements":["req1","req2"],"hints":["hint1"]}`
+	user := fmt.Sprintf("Topic: %s\nLanguage: %s", req.Topic, req.Language)
+	if req.Context != "" {
+		user += "\nContext: " + req.Context
+	}
+
+	result, err := s.ollama.Chat(r.Context(), system, user)
+	if err != nil {
+		httpErr(w, http.StatusServiceUnavailable, "LLM unavailable")
+		return
+	}
+
+	var task struct {
+		Task         string   `json:"task"`
+		Requirements []string `json:"requirements"`
+		Hints        []string `json:"hints"`
+	}
+	taskText := result
+	if err := parseJSON(result, &task); err == nil && task.Task != "" {
+		taskText = task.Task
+	}
+
+	id := newID()
+	s.exLock.Lock()
+	s.exSessions[id] = &exerciseSession{
+		Topic:        req.Topic,
+		Language:     req.Language,
+		Task:         taskText,
+		Requirements: task.Requirements,
+		CreatedAt:    time.Now(),
+	}
+	s.exLock.Unlock()
+
+	jsonResp(w, http.StatusOK, map[string]any{
+		"session_id":   id,
+		"task":         taskText,
+		"requirements": task.Requirements,
+		"hints":        task.Hints,
+		"language":     req.Language,
+	})
+}
+
+func (s *Server) handleExerciseSubmit(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"session_id"`
+		Code      string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Code == "" {
+		httpErr(w, http.StatusBadRequest, "session_id and code required")
+		return
+	}
+
+	s.exLock.Lock()
+	sess, ok := s.exSessions[req.SessionID]
+	s.exLock.Unlock()
+	if !ok {
+		httpErr(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	system := `Evaluate the submitted code for the exercise. Reply ONLY with JSON:
+{"passed":bool,"score":float,"feedback":"string","issues":["string"],"improvements":["string"]}`
+	user := fmt.Sprintf("Exercise: %s\nLanguage: %s\nCode:\n```%s\n%s\n```",
+		sess.Task, sess.Language, sess.Language, req.Code)
+
+	result, err := s.ollama.Chat(r.Context(), system, user)
+	if err != nil {
+		httpErr(w, http.StatusServiceUnavailable, "LLM unavailable")
+		return
+	}
+
+	var eval struct {
+		Passed       bool     `json:"passed"`
+		Score        float64  `json:"score"`
+		Feedback     string   `json:"feedback"`
+		Issues       []string `json:"issues"`
+		Improvements []string `json:"improvements"`
+	}
+	if err := parseJSON(result, &eval); err != nil {
+		eval.Feedback = result
+	}
+
+	stats := s.adaptive.Record(sess.Topic, eval.Passed)
+	if eval.Passed {
+		s.exLock.Lock()
+		delete(s.exSessions, req.SessionID)
+		s.exLock.Unlock()
+	}
+
+	jsonResp(w, http.StatusOK, map[string]any{
+		"passed":       eval.Passed,
+		"score":        eval.Score,
+		"feedback":     eval.Feedback,
+		"issues":       eval.Issues,
+		"improvements": eval.Improvements,
+		"new_mastery":  round2(stats.Mastery()),
+	})
+}
+
+func (s *Server) handleFlashcards(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Topic   string `json:"topic"`
+		Content string `json:"content"`
+		Count   int    `json:"count"`
+		Deck    string `json:"deck"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Topic == "" {
+		httpErr(w, http.StatusBadRequest, "topic required")
+		return
+	}
+	if req.Count <= 0 || req.Count > 20 {
+		req.Count = 5
+	}
+	if req.Deck == "" {
+		req.Deck = req.Topic
+	}
+
+	system := fmt.Sprintf(`Generate %d flashcards for "%s". Reply ONLY with JSON:
+{"cards":[{"front":"concise question","back":"answer with bullet points where helpful","tags":["tag1"]}]}`, req.Count, req.Topic)
+	user := req.Topic
+	if req.Content != "" {
+		user += "\nContext:\n" + req.Content
+	}
+
+	result, err := s.ollama.Chat(r.Context(), system, user)
+	if err != nil {
+		httpErr(w, http.StatusServiceUnavailable, "LLM unavailable")
+		return
+	}
+
+	var parsed struct {
+		Cards []struct {
+			Front string   `json:"front"`
+			Back  string   `json:"back"`
+			Tags  []string `json:"tags"`
+		} `json:"cards"`
+	}
+	if err := parseJSON(result, &parsed); err != nil || len(parsed.Cards) == 0 {
+		httpErr(w, http.StatusInternalServerError, "failed to generate cards")
+		return
+	}
+
+	// Build Obsidian-to-Anki markdown matching vault format
+	deckLower := strings.ToLower(strings.ReplaceAll(req.Deck, " ", "-"))
+	topicSlug := strings.ToLower(strings.ReplaceAll(req.Topic, " ", "-"))
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "---\ntags: [flashcards/%s, review/daily]\nanki-deck: %s\n---\n\nTARGET DECK: %s\n\n", deckLower, req.Deck, req.Deck)
+	for _, c := range parsed.Cards {
+		tagParts := make([]string, 0, len(c.Tags)+1)
+		tagParts = append(tagParts, "#"+topicSlug)
+		for _, t := range c.Tags {
+			tagParts = append(tagParts, "#"+strings.ToLower(strings.ReplaceAll(t, " ", "-")))
+		}
+		fmt.Fprintf(&sb, "START\nBasic\n%s\nBack:\n%s\nTags: %s\n<!--ID: 0-->\nEND\n\n---\n",
+			c.Front, c.Back, strings.Join(tagParts, " "))
+	}
+
+	type cardOut struct {
+		Front string `json:"front"`
+		Back  string `json:"back"`
+	}
+	out := make([]cardOut, len(parsed.Cards))
+	for i, c := range parsed.Cards {
+		out[i] = cardOut{Front: c.Front, Back: c.Back}
+	}
+
+	jsonResp(w, http.StatusOK, map[string]any{
+		"cards":    out,
+		"markdown": sb.String(),
+		"topic":    req.Topic,
+		"deck":     req.Deck,
+	})
+}
+
+func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Prompt   string `json:"prompt"`
+		Context  string `json:"context"`
+		Filetype string `json:"filetype"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Prompt == "" {
+		httpErr(w, http.StatusBadRequest, "prompt required")
+		return
+	}
+
+	system := `You are Diamond, a direct and concise coding assistant. Answer clearly, no filler.`
+	user := req.Prompt
+	if req.Context != "" {
+		ft := req.Filetype
+		if ft == "" {
+			ft = "code"
+		}
+		user += "\n\n```" + ft + "\n" + req.Context + "\n```"
+	}
+
+	result, err := s.ollama.Chat(r.Context(), system, user)
+	if err != nil {
+		log.Printf("ask: %v", err)
+		httpErr(w, http.StatusServiceUnavailable, "LLM unavailable")
+		return
+	}
+
+	jsonResp(w, http.StatusOK, map[string]any{"response": result, "prompt": req.Prompt})
 }
 
 func (s *Server) handleLCDSet(w http.ResponseWriter, r *http.Request) {

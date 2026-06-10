@@ -11,7 +11,7 @@ import (
 func main() {
 	cfg := server.Config{
 		OllamaURL: getenv("DIAMOND_OLLAMA_URL", "http://localhost:11434"),
-		Model:     getenv("DIAMOND_MODEL", "qwen2.5-coder:3b"),
+		Model:     getenv("DIAMOND_MODEL", "qwen2.5-coder:7b"),
 		Port:      getenv("DIAMOND_PORT", "7331"),
 		DataDir:   getenv("DIAMOND_DATA_DIR", "/var/lib/diamond"),
 	}

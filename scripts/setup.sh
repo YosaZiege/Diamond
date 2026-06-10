@@ -28,7 +28,7 @@ fi
 
 # ---- Models ----
 echo "[3/5] Pulling model..."
-ollama pull qwen2.5-coder:3b
+ollama pull qwen2.5-coder:7b
 
 # ---- Build Diamond ----
 echo "[4/5] Building Diamond server..."
