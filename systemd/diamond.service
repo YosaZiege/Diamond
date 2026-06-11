@@ -1,7 +1,6 @@
 [Unit]
 Description=Diamond Learning Server
-After=network.target ollama.service
-Wants=ollama.service
+After=network.target
 
 [Service]
 Type=simple
@@ -11,8 +10,9 @@ ExecStart=/opt/diamond/diamond
 Restart=on-failure
 RestartSec=5
 
-Environment=DIAMOND_OLLAMA_URL=http://localhost:11434
-Environment=DIAMOND_MODEL=qwen2.5-coder:7b
+Environment=DIAMOND_LLM_URL=https://api.deepseek.com
+Environment=DIAMOND_LLM_KEY=your-deepseek-api-key-here
+Environment=DIAMOND_MODEL=deepseek-chat
 Environment=DIAMOND_PORT=7331
 Environment=DIAMOND_DATA_DIR=/var/lib/diamond
 

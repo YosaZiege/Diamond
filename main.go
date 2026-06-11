@@ -12,10 +12,11 @@ import (
 
 func main() {
 	cfg := server.Config{
-		OllamaURL: getenv("DIAMOND_OLLAMA_URL", "http://localhost:11434"),
-		Model:     getenv("DIAMOND_MODEL", "qwen2.5-coder:7b"),
-		Port:      getenv("DIAMOND_PORT", "7331"),
-		DataDir:   getenv("DIAMOND_DATA_DIR", "/var/lib/diamond"),
+		LLMURL:  getenv("DIAMOND_LLM_URL", "https://api.deepseek.com"),
+		APIKey:  getenv("DIAMOND_LLM_KEY", ""),
+		Model:   getenv("DIAMOND_MODEL", "deepseek-chat"),
+		Port:    getenv("DIAMOND_PORT", "7331"),
+		DataDir: getenv("DIAMOND_DATA_DIR", "/var/lib/diamond"),
 	}
 
 	srv, err := server.New(cfg)
@@ -23,10 +24,10 @@ func main() {
 		log.Fatalf("failed to init server: %v", err)
 	}
 
-	// Keep model hot in Ollama's RAM — ping every 25 seconds
+	// Keep model warm in RAM — no-op for external API providers
 	go srv.KeepWarm(context.Background(), 25*time.Second)
 
-	log.Printf("Diamond server on :%s | Ollama: %s | Model: %s", cfg.Port, cfg.OllamaURL, cfg.Model)
+	log.Printf("Diamond server on :%s | LLM: %s | Model: %s", cfg.Port, cfg.LLMURL, cfg.Model)
 	if err := http.ListenAndServe(":"+cfg.Port, srv); err != nil {
 		log.Fatal(err)
 	}
@@ -38,4 +39,3 @@ func getenv(key, fallback string) string {
 	}
 	return fallback
 }
-

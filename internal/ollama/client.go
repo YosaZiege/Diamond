@@ -1,3 +1,5 @@
+// OpenAI-compatible LLM client.
+// Works with DeepSeek (https://api.deepseek.com), Ollama (/v1 endpoint), or any OpenAI-compat API.
 package ollama
 
 import (
@@ -5,103 +7,111 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
 type Client struct {
 	baseURL string
+	apiKey  string
 	model   string
 	http    *http.Client
 }
 
-func New(baseURL, model string) *Client {
+// New creates a client.
+// baseURL: "https://api.deepseek.com" for DeepSeek, "http://localhost:11434/v1" for Ollama.
+// apiKey:  Bearer token; empty for local Ollama.
+func New(baseURL, apiKey, model string) *Client {
 	return &Client{
-		baseURL: baseURL,
+		baseURL: strings.TrimRight(baseURL, "/"),
+		apiKey:  apiKey,
 		model:   model,
 		http:    &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
-type message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type chatRequest struct {
-	Model    string    `json:"model"`
-	Messages []message `json:"messages"`
-	Stream   bool      `json:"stream"`
-}
-
-type chatResponse struct {
-	Message message `json:"message"`
-}
-
 func (c *Client) Chat(ctx context.Context, system, user string) (string, error) {
-	body, err := json.Marshal(chatRequest{
-		Model: c.model,
-		Messages: []message{
-			{Role: "system", Content: system},
-			{Role: "user", Content: user},
+	body, _ := json.Marshal(map[string]any{
+		"model": c.model,
+		"messages": []map[string]string{
+			{"role": "system", "content": system},
+			{"role": "user", "content": user},
 		},
-		Stream: false,
+		"stream": false,
 	})
-	if err != nil {
-		return "", err
-	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("ollama unreachable: %w", err)
+		return "", fmt.Errorf("LLM unreachable: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ollama returned %d", resp.StatusCode)
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("LLM error %d: %s", resp.StatusCode, string(b))
 	}
 
-	var result chatResponse
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("decode response: %w", err)
 	}
-	return result.Message.Content, nil
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("empty response from LLM")
+	}
+	return result.Choices[0].Message.Content, nil
 }
 
+// Ping checks reachability. For external APIs it verifies the key via GET /models.
+// For local Ollama (no apiKey) it hits /models on the base URL.
 func (c *Client) Ping(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/tags", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.baseURL+"/models", nil)
 	if err != nil {
 		return err
 	}
-	resp, err := c.http.Do(req)
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	cl := &http.Client{Timeout: 5 * time.Second}
+	resp, err := cl.Do(req)
 	if err != nil {
-		return fmt.Errorf("ollama unreachable: %w", err)
+		return fmt.Errorf("unreachable: %w", err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ollama returned %d", resp.StatusCode)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 	return nil
 }
 
-// ── Keep Warm ───────────────────────────────────────────────────────────────
-
-// KeepWarm starts a background goroutine that pings Ollama every interval
-// to keep the model loaded in RAM. Call once at startup.
+// KeepWarm periodically pings the LLM to keep a local model loaded in RAM.
+// No-op for external API providers (apiKey set) — cloud APIs don't evict models.
 func (c *Client) KeepWarm(ctx context.Context, interval time.Duration) {
+	if c.apiKey != "" {
+		return
+	}
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-
-		// Warm up immediately on start
 		c.warmUp(ctx)
-
 		for {
 			select {
 			case <-ticker.C:
@@ -114,28 +124,8 @@ func (c *Client) KeepWarm(ctx context.Context, interval time.Duration) {
 }
 
 func (c *Client) warmUp(ctx context.Context) {
-	// Use a short timeout for warm-up pings so they don't block
-	warmCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	wCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-
-	body, _ := json.Marshal(chatRequest{
-		Model: c.model,
-		Messages: []message{
-			{Role: "user", Content: "ping"},
-		},
-		Stream: false,
-	})
-
-	req, err := http.NewRequestWithContext(warmCtx, http.MethodPost, c.baseURL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
+	// Minimal chat to keep the model in RAM
+	c.Chat(wCtx, "", "ping") //nolint:errcheck
 }
-

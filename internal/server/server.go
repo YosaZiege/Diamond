@@ -17,10 +17,11 @@ import (
 )
 
 type Config struct {
-	OllamaURL string
-	Model     string
-	Port      string
-	DataDir   string
+	LLMURL  string
+	APIKey  string
+	Model   string
+	Port    string
+	DataDir string
 }
 
 type Server struct {
@@ -64,7 +65,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{
 		mux:        http.NewServeMux(),
-		ollama:     ollama.New(cfg.OllamaURL, cfg.Model),
+		ollama:     ollama.New(cfg.LLMURL, cfg.APIKey, cfg.Model),
 		adaptive:   eng,
 		sessions:   make(map[string]*quizSession),
 		exSessions: make(map[string]*exerciseSession),
