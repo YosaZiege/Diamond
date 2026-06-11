@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -62,14 +63,18 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("adaptive engine: %w", err)
 	}
 	s := &Server{
-		mux:      http.NewServeMux(),
-		ollama:   ollama.New(cfg.OllamaURL, cfg.Model),
-		adaptive: eng,
+		mux:        http.NewServeMux(),
+		ollama:     ollama.New(cfg.OllamaURL, cfg.Model),
+		adaptive:   eng,
 		sessions:   make(map[string]*quizSession),
 		exSessions: make(map[string]*exerciseSession),
 	}
 	s.routes()
 	return s, nil
+}
+
+func (s *Server) KeepWarm(ctx context.Context, interval time.Duration) {
+	s.ollama.KeepWarm(ctx, interval)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/yosa/diamond/internal/server"
 )
@@ -21,6 +23,9 @@ func main() {
 		log.Fatalf("failed to init server: %v", err)
 	}
 
+	// Keep model hot in Ollama's RAM — ping every 25 seconds
+	go srv.KeepWarm(context.Background(), 25*time.Second)
+
 	log.Printf("Diamond server on :%s | Ollama: %s | Model: %s", cfg.Port, cfg.OllamaURL, cfg.Model)
 	if err := http.ListenAndServe(":"+cfg.Port, srv); err != nil {
 		log.Fatal(err)
@@ -33,3 +38,4 @@ func getenv(key, fallback string) string {
 	}
 	return fallback
 }
+

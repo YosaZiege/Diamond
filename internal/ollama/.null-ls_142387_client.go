@@ -138,4 +138,3 @@ func (c *Client) warmUp(ctx context.Context) {
 	}
 	defer resp.Body.Close()
 }
-
